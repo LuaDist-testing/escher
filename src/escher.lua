@@ -1,6 +1,7 @@
 local crypto = require("crypto")
 local date = require("date")
 local urlhandler = require("escher.urlhandler")
+local socketurl = require("socket.url")
 local Escher = {
   algoPrefix      = 'ESR',
   vendorKey       = 'ESCHER',
@@ -25,16 +26,18 @@ end
 
 
 function Escher:authenticate(request, getApiSecret)
+  local uri = socketurl.parse(request.url)
+  local isPresignedUrl = string.match(uri.query or '', "Signature") and request.method == 'GET'
 
   local dateHeader = self:getHeader(request.headers, self.dateHeaderName)
   local authHeader = self:getHeader(request.headers, self.authHeaderName)
   local hostHeader = self:getHeader(request.headers, 'host')
 
-  if dateHeader == nil then
+  if dateHeader == nil and not isPresignedUrl then
     return self.throwError("The " .. self.dateHeaderName:lower() .. " header is missing")
   end
 
-  if authHeader == nil then
+  if authHeader == nil and not isPresignedUrl then
     return self.throwError("The " .. self.authHeaderName:lower() .. " header is missing")
   end
 
@@ -42,7 +45,21 @@ function Escher:authenticate(request, getApiSecret)
     return self.throwError("The host header is missing")
   end
 
-  local authParts = self:parseAuthHeader(authHeader)
+  local authParts
+  local expires
+  local requestDate
+
+  if isPresignedUrl then
+    requestDate = date(string.match(uri.query, 'Date=([A-Za-z0-9]+)&'))
+    authParts = self:parseQuery(socketurl.unescape(uri.query))
+    request.body = 'UNSIGNED-PAYLOAD';
+    expires = tonumber(string.match(uri.query, 'Expires=([0-9]+)&'))
+    request.url = self:canonicalizeUrl(request.url)
+  else
+    requestDate = date(dateHeader)
+    authParts = self:parseAuthHeader(authHeader or '')
+    expires = 0
+  end
 
   if authParts.hashAlgo == nil then
     return self.throwError("Could not parse auth header")
@@ -52,7 +69,7 @@ function Escher:authenticate(request, getApiSecret)
     return self.throwError("The host header is not signed")
   end
 
-  if not string.match(authParts.signedHeaders, "date") then
+  if not string.match(authParts.signedHeaders, "date") and not isPresignedUrl then
     return self.throwError("The date header is not signed")
   end
 
@@ -64,27 +81,25 @@ function Escher:authenticate(request, getApiSecret)
     return self.throwError("Only SHA256 and SHA512 hash algorithms are allowed")
   end
 
-  local requestDate = date(dateHeader)
-
   if authParts.shortDate ~= requestDate:fmt("%Y%m%d") then
     return self.throwError("The credential date does not match with the request date")
   end
 
-  if not self:isDateWithinRange(requestDate, self.clockSkew) then
+  if not self:isDateWithinRange(requestDate, expires) then
     return self.throwError("The request date is not within the accepted time range")
   end
 
   local apiSecret = getApiSecret(authParts.accessKeyId)
 
   if apiSecret == nil then
-    return self.throwError("Invalid API key")
+    return self.throwError("Invalid Escher key")
   end
 
   self.apiSecret = apiSecret
   self.date = date(requestDate)
-  local headersToSignTest = splitter(authParts.signedHeaders, ';')
+  local headersToSign = splitter(authParts.signedHeaders, ';')
 
-  if authParts.signature ~= self:calculateSignature(request, headersToSignTest) then
+  if authParts.signature ~= self:calculateSignature(request, headersToSign) then
     return self.throwError("The signatures do not match")
   end
 
@@ -107,7 +122,6 @@ end
 function Escher:canonicalizeRequest(request, headersToSign)
   local url = urlhandler.parse(request.url):normalize()
   local headers = self:filterHeaders(request.headers, headersToSign)
-
   return table.concat({
     request.method,
     url.path,
@@ -169,6 +183,7 @@ end
 
 
 function Escher:getStringToSign(request, headersToSign)
+
   return table.concat({
     string.format('%s-HMAC-%s', self.algoPrefix, self.hashAlgo),
     self:toLongDate(),
@@ -221,7 +236,23 @@ function Escher:parseAuthHeader(authHeader)
             "Credential=([A-Za-z0-9%-%_]+)/(%d+)/([A-Za-z0-9%-%_%/]-),%s*" ..
             "SignedHeaders=([a-z0-9%-%_%;]+),%s*" ..
             "Signature=([a-f0-9]+)")
+  return {
+    hashAlgo = hashAlgo,
+    accessKeyId = accessKeyId,
+    shortDate = shortDate,
+    credentialScope = credentialScope,
+    signedHeaders = signedHeaders,
+    signature = signature
+  }
+end
 
+
+
+function Escher:parseQuery(query)
+  local hashAlgo = string.match(query, self.algoPrefix .. "%-HMAC%-(%w+)&")
+  local accessKeyId, shortDate, credentialScope = string.match(query, "Credentials=([A-Za-z0-9%-%_]+)/(%d+)/([A-Za-z0-9%-%_%/]-)&")
+  local signedHeaders = string.match(query, "SignedHeaders=([a-z0-9%-%_%;]+)&")
+  local signature = string.match(query, "Signature=([a-f0-9]+)")
   return {
     hashAlgo = hashAlgo,
     accessKeyId = accessKeyId,
@@ -252,9 +283,9 @@ end
 
 
 
-function Escher:isDateWithinRange(request_date, skew)
+function Escher:isDateWithinRange(request_date, expires)
   local diff = math.abs(date.diff(self.date, request_date):spanseconds())
-  return diff <= skew
+  return diff <= self.clockSkew + expires
 end
 
 
@@ -287,13 +318,62 @@ function Escher.headerNeedToSign(headerName, headersToSign)
   return enable
 end
 
-function table.contains(table, element)
-  for _, value in pairs(table) do
-    if value:lower() == element then
-      return true
+function Escher:generatePreSignedUrl(url, client, expires)
+  if expires == nil then
+    expires = 86400
+  end
+
+  local parsedUrl = socketurl.parse(socketurl.unescape(url))
+  local host = parsedUrl.host
+  local headers = {{'host', host}}
+  local headersToSign = {'host'}
+  local body = 'UNSIGNED-PAYLOAD'
+  local params = {
+    Algorithm = self.algoPrefix .. '-HMAC-' .. self.hashAlgo,
+    Credentials = string.gsub(client[1] .. '/' .. self:toShortDate() .. '/' .. self.credentialScope, '/', '%%2F'),
+    Date = self:toLongDate(),
+    Expires = expires,
+    SignedHeaders = headersToSign[1],
+  }
+
+  local hash = ''
+  if parsedUrl.fragment ~= nil then
+    hash = '#' .. parsedUrl.fragment
+    parsedUrl.fragment = ''
+    url = string.gsub(socketurl.build(parsedUrl), "#", '')
+  end
+
+  local signedUrl = url .. "&" ..
+          "X-EMS-Algorithm=" .. params.Algorithm .. '&' ..
+          "X-EMS-Credentials=" .. params.Credentials .. '&' ..
+          "X-EMS-Date=" .. params.Date .. '&' ..
+          "X-EMS-Expires=" .. params.Expires .. '&' ..
+          "X-EMS-SignedHeaders=" .. params.SignedHeaders .. '&'
+
+  local parsedSignedUrl = socketurl.parse(signedUrl)
+  local request = {
+    host = host,
+    method = 'GET',
+    url = parsedSignedUrl.path .. '?' .. (parsedSignedUrl.query),
+    headers = headers,
+    body = body,
+  }
+  local signature = self:calculateSignature(request, headersToSign)
+  signedUrl = signedUrl .. "X-EMS-Signature=" .. signature  .. hash
+  return signedUrl
+end
+
+function Escher:canonicalizeUrl(url)
+  local splittedUrl = splitter(url, "&")
+  local canonicalizedUrl = ''
+
+  for _, value in ipairs(splittedUrl) do
+    if not string.match(value, "Signature") then
+      canonicalizedUrl = canonicalizedUrl .. value .. "&"
     end
   end
-  return false
+
+  return string.sub(canonicalizedUrl, 1, -2)
 end
 
 function splitter(inputstr, sep)

@@ -1,5 +1,6 @@
 local json = require("json")
 local Escher = require("escher")
+local socketUrl = require("socket.url")
 
 function readTest(filename)
   local f = io.open(filename, "r")
@@ -74,14 +75,25 @@ function runTestFiles(group, fn)
       'spec/emarsys_testsuite/authenticate-error-missing-auth-header.json',
       'spec/emarsys_testsuite/authenticate-error-missing-date-header.json',
       'spec/emarsys_testsuite/authenticate-error-missing-host-header.json',
-     --  'spec/emarsys_testsuite/authenticate-error-presigned-url-expired.json',
+      'spec/emarsys_testsuite/authenticate-error-presigned-url-expired.json',
       'spec/emarsys_testsuite/authenticate-error-request-date-invalid.json',
       'spec/emarsys_testsuite/authenticate-error-wrong-signature.json',
       'spec/emarsys_testsuite/authenticate-valid-authentication-datein-expiretime.json',
       'spec/emarsys_testsuite/authenticate-valid-get-vanilla-empty-query-with-custom-headernames.json',
       'spec/emarsys_testsuite/authenticate-valid-get-vanilla-empty-query.json',
       'spec/emarsys_testsuite/authenticate-valid-ignore-headers-order.json',
-     --  'spec/emarsys_testsuite/authenticate-valid-presigned-url-with-query.json'
+      'spec/emarsys_testsuite/authenticate-valid-presigned-url-with-query.json',
+      'spec/emarsys_testsuite/authenticate-valid-presigned-double-url-encoded.json'
+    },
+    generateSignedUrl = {
+      'spec/emarsys_testsuite/presignurl-valid-with-path-query.json',
+      'spec/emarsys_testsuite/presignurl-valid-with-port.json',
+      'spec/emarsys_testsuite/presignurl-valid-with-hash.json',
+      'spec/emarsys_testsuite/presignurl-valid-with-URL-encoded-array-parameters.json',
+      'spec/emarsys_testsuite/presignurl-valid-with-double-url-encoded.json'
+    },
+    generateAndAuthenticate = {
+      'spec/emarsys_testsuite/authenticate-valid-with-generating-presigned-url-with-query.json',
     }
   }
   for _, testFile in pairs(testFiles[group]) do
@@ -129,6 +141,22 @@ describe("Escher TestSuite", function()
 
   end)
 
+  describe('generatePreSignedUrl', function()
+
+    runTestFiles("generateSignedUrl", function(testFile, test)
+      it("should return the proper url string" .. testFile, function()
+        local escher = Escher:new(getConfigFromTestsuite(test.config))
+        local client = {test.config.accessKeyId, test.config.apiSecret}
+        local signedUrl = escher:generatePreSignedUrl(test.request.url, client, test.request.expires)
+
+        if test.expected.url then
+          assert.are.equals(test.expected.url, signedUrl)
+        end
+      end)
+    end)
+
+  end)
+
   describe('authenticateRequest', function()
 
     runTestFiles("validation", function(testFile, test)
@@ -156,4 +184,67 @@ describe("Escher TestSuite", function()
 
   end)
 
+  describe('generateAndAuthenticatePreSignedUrl', function()
+
+    runTestFiles("generateAndAuthenticate", function(testFile, test)
+      it("should validate the request " .. testFile, function()
+        local escher = Escher:new(getConfigFromTestsuite(test.config))
+        local client = {test.config.accessKeyId, test.config.apiSecret}
+
+        local getApiSecret = function(key)
+          for _, element in pairs(test.keyDb) do
+            if element[1] == key then
+              return element[2]
+            end
+          end
+        end
+
+--      print('\n\nFull url before presign process:\n\n' .. test.request.url)
+
+        test.request.url = escher:generatePreSignedUrl(test.request.url, client, test.request.expires)
+        local request = createRequestFromUrl(test.request.url)
+        local apiKey, err = escher:authenticate(request, getApiSecret)
+        if test.expected.apiKey then
+          assert.are.equals(nil, err)
+          assert.are.equals(test.expected.apiKey, apiKey)
+        end
+        if test.expected.error then
+          assert.are.equals(test.expected.error, err)
+          assert.are.equals(false, apiKey)
+        end
+      end)
+
+    end)
+
+  end)
+
 end)
+
+function createRequestFromUrl(url)
+  local parsedUrl = socketUrl.parse(url)
+  local buildedUrl = ''
+  local enableBuild = false
+
+  for _,v in ipairs(socketUrl.parse_path(url)) do
+    if enableBuild then
+      buildedUrl = buildedUrl .. '/' .. v
+    elseif string.find(v, parsedUrl.host) ~= nil then
+      enableBuild = true
+    end
+  end
+
+--  --TEST-START
+--  print("\n\nFull url after presign process:\n\n" .. url .. "\n\nUrl segments:\n")
+--  for k,v in ipairs(socketUrl.parse_path(url)) do
+--    print(k .. ' : ' .. v)
+--  end
+--  print('\nBuilded url:\n\n' .. buildedUrl .. '\n')
+--  --TEST-END
+
+  return {
+    method = 'GET',
+    url = buildedUrl,
+    body = "",
+    headers = {{'Host', parsedUrl.host}}
+  }
+end
