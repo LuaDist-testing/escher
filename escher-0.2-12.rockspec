@@ -1,16 +1,16 @@
 -- This file was automatically generated for the LuaDist project.
 
 package = "escher"
-version = "0.2-11"
+version = "0.2-12"
 -- LuaDist source
 source = {
-  tag = "0.2-11",
+  tag = "0.2-12",
   url = "git://github.com/LuaDist-testing/escher.git"
 }
 -- Original source
 -- source = {
 --   url = "git://github.com/emartech/escher-lua",
---   tag = "0.2-11",
+--   tag = "0.2-12",
 --   dir = "escher-lua"
 -- }
 description = {

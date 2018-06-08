@@ -208,11 +208,12 @@ end
 
 
 
-function Escher:generateHeader(request)
+function Escher:generateHeader(request, headersToSign)
+  headersToSign = headersToSign or {"host", self.dateHeaderName}
   return self.algoPrefix .. "-HMAC-" .. self.hashAlgo ..
           " Credential=" .. self:generateFullCredentials() ..
           ", SignedHeaders=" .. self:canonicalizeSignedHeaders(request.headers) ..
-          ", Signature=" .. self:calculateSignature(request)
+          ", Signature=" .. self:calculateSignature(request, headersToSign)
 end
 
 
