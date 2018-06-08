@@ -62,10 +62,16 @@ function Escher:authenticate(request, getApiSecret, mandatorySignedHeaders)
   end
 
   if authParts.hashAlgo == nil then
-    return self.throwError("Could not parse auth header")
+    return self.throwError("Could not parse " .. self.authHeaderName .. " header")
   end
 
   local headersToSign = splitter(authParts.signedHeaders, ';')
+
+  for _, header in ipairs(headersToSign) do
+    if string.lower(header) ~= header then
+      return self.throwError("SignedHeaders must contain lowercase header names in the " .. self.authHeaderName .. " header")
+    end
+  end
 
   if mandatorySignedHeaders == nil then
     mandatorySignedHeaders = {}
@@ -263,7 +269,7 @@ function Escher:parseAuthHeader(authHeader)
   local hashAlgo, accessKeyId, shortDate, credentialScope, signedHeaders, signature = string.match(authHeader,
     self.algoPrefix .. "%-HMAC%-(%w+)%s+" ..
             "Credential=([A-Za-z0-9%-%_]+)/(%d+)/([A-Za-z0-9%-%_%/% ]-),%s*" ..
-            "SignedHeaders=([a-z0-9%-%_%;]+),%s*" ..
+            "SignedHeaders=([a-zA-Z0-9%-%_%;]+),%s*" ..
             "Signature=([a-f0-9]+)")
   return {
     hashAlgo = hashAlgo,

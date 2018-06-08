@@ -1,8 +1,10 @@
 {
-  "title": "should detect invalid authentication header",
-  "description": "The authentication header must have the right format.",
+  "title": "should check if all signed headers are lowercase",
+  "description": "",
   "headersToSign": [
-    "date"
+    "date",
+    "host",
+    "TEST"
   ],
   "request": {
     "method": "GET",
@@ -13,12 +15,16 @@
         "Fri, 09 Sep 2011 23:36:00 GMT"
       ],
       [
-        "Authorization",
-        "INVALID AUTH HEADER"
-      ],
-      [
         "Host",
         "host.foo.com"
+      ],
+      [
+        "TEST",
+        "testHeader"
+      ],
+      [
+        "Authorization",
+        "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20110909/us-east-1/host/aws4_request, SignedHeaders=date;host;TEST, Signature=df0e59d0b15dc930e47b99e6491826a90da5edd32a72ddfaaa573d70471ad911"
       ]
     ],
     "body": ""
@@ -39,6 +45,6 @@
     ]
   ],
   "expected": {
-    "error": "Could not parse Authorization header"
+    "error": "SignedHeaders must contain lowercase header names in the Authorization header"
   }
 }
