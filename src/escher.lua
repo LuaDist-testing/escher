@@ -9,7 +9,7 @@ local Escher = {
   credentialScope = 'escher_request',
   authHeaderName  = 'X-Escher-Auth',
   dateHeaderName  = 'X-Escher-Date',
-  clockSkew       = 900,
+  clockSkew       = 300,
   date            = false
 }
 
@@ -25,7 +25,7 @@ end
 
 
 
-function Escher:authenticate(request, getApiSecret)
+function Escher:authenticate(request, getApiSecret, mandatorySignedHeaders)
   local uri = socketurl.parse(request.url)
   local isPresignedUrl = string.match(uri.query or '', "Signature") and request.method == 'GET'
 
@@ -65,12 +65,28 @@ function Escher:authenticate(request, getApiSecret)
     return self.throwError("Could not parse auth header")
   end
 
-  if not string.match(authParts.signedHeaders, "host") then
-    return self.throwError("The host header is not signed")
+  local headersToSign = splitter(authParts.signedHeaders, ';')
+
+  if mandatorySignedHeaders == nil then
+    mandatorySignedHeaders = {}
   end
 
-  if not string.match(authParts.signedHeaders, "date") and not isPresignedUrl then
-    return self.throwError("The date header is not signed")
+  if type(mandatorySignedHeaders) ~= 'table' then
+    return self.throwError("The mandatorySignedHeaders parameter must be undefined or array of strings")
+  end
+
+  table.insert(mandatorySignedHeaders, 'host')
+  if not isPresignedUrl then
+    table.insert(mandatorySignedHeaders, self.dateHeaderName:lower())
+  end
+
+  for _, header in ipairs(mandatorySignedHeaders) do
+    if type(header) ~= 'string' then
+      return self.throwError("The mandatorySignedHeaders parameter must be undefined or array of strings")
+    end
+    if not table.contains(headersToSign, header) then
+      return self.throwError("The " ..  header .. " header is not signed")
+    end
   end
 
   if authParts.credentialScope ~= self.credentialScope then
@@ -82,7 +98,7 @@ function Escher:authenticate(request, getApiSecret)
   end
 
   if authParts.shortDate ~= requestDate:fmt("%Y%m%d") then
-    return self.throwError("The credential date does not match with the request date")
+    return self.throwError("The " .. self.authHeaderName .. " header's shortDate does not match with the request date")
   end
 
   if not self:isDateWithinRange(requestDate, expires) then
@@ -97,7 +113,6 @@ function Escher:authenticate(request, getApiSecret)
 
   self.apiSecret = apiSecret
   self.date = date(requestDate)
-  local headersToSign = splitter(authParts.signedHeaders, ';')
 
   if authParts.signature ~= self:calculateSignature(request, headersToSign) then
     return self.throwError("The signatures do not match")
@@ -121,14 +136,16 @@ end
 
 function Escher:canonicalizeRequest(request, headersToSign)
   local url = urlhandler.parse(request.url):normalize()
+  headersToSign = self:addDefaultsToHeadersToSign(headersToSign)
   local headers = self:filterHeaders(request.headers, headersToSign)
+
   return table.concat({
     request.method,
     url.path,
     url.query,
     self:canonicalizeHeaders(headers),
     "",
-    self:canonicalizeSignedHeaders(headers),
+    self:canonicalizeSignedHeaders(headers, headersToSign),
     crypto.digest(self.hashAlgo, request.body or '')
   }, "\n")
 end
@@ -162,12 +179,14 @@ end
 
 
 
-function Escher:canonicalizeSignedHeaders(headers)
+function Escher:canonicalizeSignedHeaders(headers, signedHeaders)
   local uniqueKeys = {}
   for _, header in pairs(headers) do
     local name = header[1]:lower()
     if name ~= self.authHeaderName:lower() then
-      uniqueKeys[name] = true
+      if (table.contains(signedHeaders, name) or name == self.dateHeaderName:lower() or name == 'host') then
+        uniqueKeys[name] = true
+      end
     end
   end
 
@@ -208,11 +227,20 @@ end
 
 
 
+function Escher:signRequest(request, headersToSign)
+  local authHeader = self:generateHeader(request, headersToSign)
+  table.insert(request.headers, {self.authHeaderName, authHeader})
+  return request
+end
+
+
+
 function Escher:generateHeader(request, headersToSign)
-  headersToSign = headersToSign or {"host", self.dateHeaderName}
+  request.headers = self:addDefaultToHeaders(request.headers)
+
   return self.algoPrefix .. "-HMAC-" .. self.hashAlgo ..
           " Credential=" .. self:generateFullCredentials() ..
-          ", SignedHeaders=" .. self:canonicalizeSignedHeaders(request.headers) ..
+          ", SignedHeaders=" .. self:canonicalizeSignedHeaders(request.headers, headersToSign) ..
           ", Signature=" .. self:calculateSignature(request, headersToSign)
 end
 
@@ -234,7 +262,7 @@ end
 function Escher:parseAuthHeader(authHeader)
   local hashAlgo, accessKeyId, shortDate, credentialScope, signedHeaders, signature = string.match(authHeader,
     self.algoPrefix .. "%-HMAC%-(%w+)%s+" ..
-            "Credential=([A-Za-z0-9%-%_]+)/(%d+)/([A-Za-z0-9%-%_%/]-),%s*" ..
+            "Credential=([A-Za-z0-9%-%_]+)/(%d+)/([A-Za-z0-9%-%_%/% ]-),%s*" ..
             "SignedHeaders=([a-z0-9%-%_%;]+),%s*" ..
             "Signature=([a-f0-9]+)")
   return {
@@ -387,6 +415,43 @@ function splitter(inputstr, sep)
     i = i + 1
   end
   return t
+end
+
+function table.contains(table, element)
+  for _, value in pairs(table) do
+    if value:lower() == element:lower() then
+      return true
+    end
+  end
+  return false
+end
+
+function Escher:addDefaultToHeaders(headers)
+  local insertDate = true
+
+  for _, values in ipairs(headers) do
+    if values[1]:lower() == self.dateHeaderName:lower() then
+      insertDate = false
+    end
+  end
+
+  if insertDate then
+    table.insert(headers, {self.dateHeaderName, self.date:fmt('${http}')})
+  end
+
+  return headers
+end
+
+function Escher:addDefaultsToHeadersToSign(headersToSign)
+  if not table.contains(headersToSign, self.dateHeaderName) then
+    table.insert(headersToSign, self.dateHeaderName)
+  end
+
+  if not table.contains(headersToSign, 'Host') then
+    table.insert(headersToSign, 'Host')
+  end
+
+  return headersToSign
 end
 
 return Escher

@@ -63,6 +63,7 @@ function runTestFiles(group, fn)
       'spec/emarsys_testsuite/signrequest-date-header-should-be-signed-headers.json',
       'spec/emarsys_testsuite/signrequest-only-sign-specified-headers.json',
       'spec/emarsys_testsuite/signrequest-support-custom-config.json',
+      'spec/emarsys_testsuite/signrequest-support-custom-config-with-customer-id.json'
     },
     validation = {
       'spec/emarsys_testsuite/authenticate-error-date-header-auth-header-date-not-equal.json',
@@ -83,7 +84,11 @@ function runTestFiles(group, fn)
       'spec/emarsys_testsuite/authenticate-valid-get-vanilla-empty-query.json',
       'spec/emarsys_testsuite/authenticate-valid-ignore-headers-order.json',
       'spec/emarsys_testsuite/authenticate-valid-presigned-url-with-query.json',
-      'spec/emarsys_testsuite/authenticate-valid-presigned-double-url-encoded.json'
+      'spec/emarsys_testsuite/authenticate-valid-presigned-double-url-encoded.json',
+      'spec/emarsys_testsuite/authenticate-valid-credential-with-spaces.json',
+      'spec/emarsys_testsuite/authenticate-error-mandatoryheaders-not-array-of-strings.json',
+      'spec/emarsys_testsuite/authenticate-error-mandatoryheaders-not-array.json',
+      'spec/emarsys_testsuite/authenticate-error-notsigned-header.json'
     },
     generateSignedUrl = {
       'spec/emarsys_testsuite/presignurl-valid-with-path-query.json',
@@ -133,6 +138,7 @@ describe("Escher TestSuite", function()
       it("should return the proper string to sign " .. testFile, function()
         local escher = Escher:new(getConfigFromTestsuite(test.config))
         local stringToSign = escher:getStringToSign(test.request, test.headersToSign)
+
         if test.expected.stringToSign then
           assert.are.equals(test.expected.stringToSign, stringToSign)
         end
@@ -140,6 +146,28 @@ describe("Escher TestSuite", function()
     end)
 
   end)
+
+  describe('signRequest', function()
+
+    runTestFiles("signing", function(testFile, test)
+      it("should generate full authorization header " .. testFile, function()
+        local escher = Escher:new(getConfigFromTestsuite(test.config))
+        test.request = escher:signRequest(test.request, test.headersToSign)
+        local authHeader = ''
+
+        for _, element in ipairs(test.request.headers) do
+          if element[1] == test.config.authHeaderName then
+            authHeader = element[2]
+          end
+        end
+
+        assert.are.equals(test.expected.authHeader, authHeader)
+
+     end)
+   end)
+
+  end)
+
 
   describe('generatePreSignedUrl', function()
 
@@ -169,7 +197,7 @@ describe("Escher TestSuite", function()
             end
           end
         end
-        local apiKey, err = escher:authenticate(test.request, getApiSecret)
+        local apiKey, err = escher:authenticate(test.request, getApiSecret, test.mandatorySignedHeaders)
         if test.expected.apiKey then
           assert.are.equals(nil, err)
           assert.are.equals(test.expected.apiKey, apiKey)
@@ -201,7 +229,7 @@ describe("Escher TestSuite", function()
 
         test.request.url = escher:generatePreSignedUrl(test.request.url, client, test.request.expires)
         local request = createRequestFromUrl(test.request.url)
-        local apiKey, err = escher:authenticate(request, getApiSecret)
+        local apiKey, err = escher:authenticate(request, getApiSecret, test.mandatorySignedHeaders)
         if test.expected.apiKey then
           assert.are.equals(nil, err)
           assert.are.equals(test.expected.apiKey, apiKey)
